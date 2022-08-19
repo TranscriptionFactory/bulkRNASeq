@@ -1,0 +1,349 @@
+---
+title: "transcript_usage"
+output: pdf_document
+---
+
+```{r sourceFiles, include=F}
+dir = "project_directory_when_working_on_cluster"
+source(knitr::purl(paste(dir, "/pipeline/load_data.Rmd", sep = ""), quiet=TRUE))
+```
+
+```{r knitr_options, include=T}
+
+#for exporting plots separately from markdown output
+knitr::opts_chunk$set(dev = "png", dev.args = list(type = "cairo-png"),
+                      fig.align = "center",
+                      dpi = 300,
+                      echo = FALSE,
+                      cache = TRUE)
+```
+
+
+
+```{r filtertranscripts, echo = F}
+
+expt.design = ~ SampleGenotype + SampleTime + SampleGenotype:SampleTime
+
+dds.unfiltered = DESeqDataSet(se, design = expt.design)
+
+#analyze high quality transcripts (transcript support levels 1 and 2)
+tsidx = which(dds.unfiltered@rowRanges@elementMetadata@listData$tx_support_level %in% c("1", "2"))
+
+dds = dds.unfiltered[tsidx,]
+
+#get empty rows
+nonzero = rowSums(counts(dds)) > 0
+dds = dds[nonzero, ]
+
+#factor so genotypes are grouped together
+dds$SampleGenotype = factor(dds$SampleGenotype, levels = c("WT", "KO")) %>%
+  relevel(dds$SampleGenotype, ref = "WT")
+
+#factor time
+dds$SampleTime = factor(dds$SampleTime, levels = c("0hr", "2hr", "6hr")) %>%
+  relevel(dds$SampleTime, ref = "0hr")
+
+dds.trx = dds
+
+#recreate deseqdataset
+dds = DESeqDataSet(dds, design = expt.design)
+
+
+# remove large objects not needed
+rm(dds.unfiltered, se)
+```
+
+
+Run DESeq and get log2 fold changes for genotypes
+```{r runDESeq, include = F}
+
+dds.de = DESeq(dds)
+
+results.names = resultsNames(dds.de)
+
+```
+
+
+# Exploratory & Unbiased (Not directly comparing samples)
+
+## QC: Sample Distances
+Visualizing sample distances
+```{r distMatrix, echo=FALSE}
+
+poisd = PoissonDistance(t(counts(dds)))
+
+samplePoisDistMatrix = as.matrix(poisd$dd)
+
+colors <- colorRampPalette((brewer.pal(9, "Blues")) )(255)
+rownames(samplePoisDistMatrix) = paste(dds$SampleGenotype, dds$SampleTime, sep = " - ")
+
+#can remove column names but will keep here
+colnames(samplePoisDistMatrix) = paste(dds$SampleGenotype, dds$SampleTime, sep = " - ")
+pheatmap::pheatmap(samplePoisDistMatrix, clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd, col = colors)
+```
+
+
+## QC: Principal Component Analysis
+
+```{r PCA proportion function, include = F}
+
+getProportions = function(pcaVals) {
+
+  pca_vars = ((pcaVals$sdev^2) / (sum(pcaVals$sdev^2))) * 100
+  
+  plot = barplot(pca_vars, cex.names = 1, xlab=paste("Principal component (PC), 1-", length(pcaVals$sdev)), ylab="Proportion of variation (%)", main="Scree plot", ylim=c(0,100))
+
+
+  return(plot)
+}
+
+
+```
+
+
+### Which genes changed the most?
+
+##### PCA
+Rank genes by variance in non-normalized counts & calculate principle components
+
+```{r PCAplot_non_normalized, include = T}
+
+#variance stabilizing transformation on non-normalized counts
+vsd = vst(dds, blind = T)
+
+#use ntop to get all rows of matrix (default is 500)
+plotPCA(vsd, intgroup = c("SampleGenotype", "SampleTime"), ntop = nrow(vsd))
+
+pl = getProportions(prcomp(t(assay(vsd)), scale = F, center = T))
+
+```
+
+#### Heatmap
+```{r hivar_genes, include = T}
+
+library("genefilter")
+topVarGenes = head(order(rowVars(assay(vsd)), decreasing = T), 30)
+mat = assay(vsd)[ topVarGenes, ]
+
+mat_genes = mcols(vsd)$symbol[topVarGenes]
+
+row.names(mat) = mat_genes
+
+mat = mat - rowMeans(mat)
+anno = as.data.frame(colData(vsd)[, c("SampleGenotype", "SampleTime")])
+
+# Modify ordering of the clusters using clustering callback option
+callback = function(hc, mat){
+    sv = svd(t(mat))$v[,1]
+    dend = reorder(as.dendrogram(hc), wts = sv)
+    as.hclust(dend)
+}
+anno$SampleTime = factor(anno$SampleTime, levels = c("0hr", "2hr", "6hr"))
+
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+heatmap.annotation_colors = list(
+  SampleGenotype = c(WT = cbPalette[1], KO = cbPalette[2]),
+  SampleTime = c("0hr" = cbPalette[3], "2hr" = cbPalette[4], "6hr" = cbPalette[5]))
+
+
+
+pheatmap::pheatmap(mat, annotation_col = anno, clustering_callback = callback, show_colnames = F,
+                   cluster_cols = F, color = colorRampPalette(rev(brewer.pal(n = 7, name =
+  "RdYlBu")))(15), annotation_colors = heatmap.annotation_colors)
+
+
+```
+
+
+# Differential gene expression between SH2B3 WT and (-/-)
+
+
+#### Heatmap
+
+SH2B3 has the smallest adjust pvalue
+
+```{r significant genes, include = T}
+
+source(paste0(dir, "/pipeline/getSignificantGenes.R"))
+anno = as.data.frame(colData(dds.de)[, c("SampleGenotype", "SampleTime")])
+
+anno$group = paste(anno$SampleGenotype, anno$SampleTime, sep = " ")
+
+test_results.baseline = getSignificantTranscripts(dds.de, c(results.names[2]))
+
+#WT and KO at 2hrs
+test_results.2hrs = getSignificantTranscripts(dds.de, c(results.names[2], results.names[5]))
+
+test_results.6hrs = getSignificantTranscripts(dds.de, c(results.names[2], results.names[6]))
+
+
+annotateTranscripts = function(test_results) {
+  test_results$significant_genes$symbol = mapIds(org.Mm.eg.db,
+                               keys = test_results$significant_genes$gene_id,
+                               column = "SYMBOL",
+                               keytype = "ENSEMBL")
+  return(test_results)
+}
+
+
+test_results.baseline = annotateTranscripts(test_results.baseline)
+test_results.2hrs = annotateTranscripts(test_results.2hrs)
+test_results.6hrs = annotateTranscripts(test_results.6hrs)
+
+results_table = test_results.baseline$significant_genes
+results_table$Time = "0hr"
+
+dtemp = test_results.2hrs$significant_genes %>% mutate(Time = "2hr")
+
+results_table = results_table %>% rbind(dtemp)
+
+dtemp = test_results.6hrs$significant_genes %>% mutate(Time = "6hr")
+
+results_table = results_table %>% rbind(dtemp)
+
+results_table$transcriptID = row.names(results_table)
+
+#for saving transcript results
+#write_tsv(results_table, file = paste0(dir, "/pipeline/dataTables/TRANSCRIPT_RESULTS.tsv"))
+```
+
+
+```{r significant genes heatmap baseline, include = T}
+colors <- colorRampPalette((brewer.pal(9, "Blues")) )(10)
+
+#colorblind palette
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+heatmap.annotation_colors = list(
+  SampleGenotype = c(WT = cbPalette[1], KO = cbPalette[2]),
+  SampleTime = c("0hr" = cbPalette[3], "2hr" = cbPalette[4], "6hr" = cbPalette[5]))
+
+significant_genes.counts = test_results.baseline$counts
+
+row.names(significant_genes.counts) = test_results.baseline$significant_genes$symbol
+
+plt.title = paste("Differential Gene Expression at Baseline (Counts): ", length(row.names(significant_genes.counts)), " Transcripts")
+
+pheatmap::pheatmap(significant_genes.counts[1:20,], annotation_col = anno[,1:2], clustering_callback = callback, show_colnames = F, show_rownames = T,
+                   cluster_cols = F,cluster_row = F, color = colors, scale = "row",
+                   annotation_colors = heatmap.annotation_colors,
+                   main = plt.title)
+```
+```{r significant genes heatmap 2hrs, include = T}
+
+significant_genes.counts = test_results.2hrs$counts
+
+row.names(significant_genes.counts) = test_results.2hrs$significant_genes$symbol
+
+plt.title = paste("Differential Gene Expression at 2hrs (Counts): ", length(row.names(significant_genes.counts)), " Transcripts")
+
+pheatmap::pheatmap(significant_genes.counts[1:20,], annotation_col = anno[,1:2], clustering_callback = callback, show_colnames = F, show_rownames = T,
+                   cluster_cols = F,cluster_row = F, color = colors, scale = "row",
+                   annotation_colors = heatmap.annotation_colors,
+                   main = plt.title)
+```
+
+
+```{r significant genes heatmap 6hrs, include = T}
+
+significant_genes.counts = test_results.6hrs$counts
+
+row.names(significant_genes.counts) = test_results.6hrs$significant_genes$symbol
+
+plt.title = paste("Differential Gene Expression at 6hrs (Counts): ", length(row.names(significant_genes.counts)), " Transcripts")
+
+pheatmap::pheatmap(significant_genes.counts[1:20,], annotation_col = anno[,1:2], clustering_callback = callback, show_colnames = F, show_rownames = T,
+                   cluster_cols = F,cluster_row = F, color = colors, scale = "row",
+                   annotation_colors = heatmap.annotation_colors,
+                   main = plt.title)
+```
+
+
+# Gene Ontology
+
+### Check significant hits against gene lists for cytokine signaling
+
+```{r cytokine go enrichment, include = T}
+
+
+go_input = data.frame(test_results.baseline$significant_genes[, c("symbol", "padj", "baseMean", "log2FoldChange")],
+                      time = "0hr") %>%
+  rbind(., data.frame(test_results.2hrs$significant_genes[, c("symbol", "padj", "baseMean", "log2FoldChange")], time = "2hr"))
+
+go_input = rbind(go_input, data.frame(test_results.6hrs$significant_genes[, c("symbol", "padj", "baseMean", "log2FoldChange")], time = "6hr"))
+
+
+go_input$entrez = mapIds(org.Mm.eg.db,
+                         keys = go_input$symbol,
+                         column = "ENTREZID",
+                         keytype = "SYMBOL")
+
+
+
+
+# write_tsv(go_input, file = paste0(dir, "/pipeline/significant_genes.tsv"))
+
+```
+
+```{r cytokine go cluster profiling, include = T}
+library(clusterProfiler)
+library(enrichplot)
+
+
+gl = go_input$log2FoldChange
+
+names(gl) = row.names(go_input)
+gl = sort(gl, decreasing = T)
+
+
+go_input_sorted = go_input %>% select(log2FoldChange) %>% arrange(log2FoldChange)
+
+gse_go = gseGO(geneList = gl, ont = "ALL",
+               keyType = "ENSEMBLTRANS", nPerm = 10000, minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "none")
+
+
+dotplot(gse_go, showCategory=10, split=".sign") + facet_grid(.~.sign)
+
+```
+
+#### Which genes are associated with cytokine-signaling?
+```{r immune_specific, include = T}
+
+go.genes = read.delim(paste0(dir, "/genesets/quickGO.tsv"), header = T)
+
+
+go.genes_targets = go.genes$SYMBOL[which(go.genes$SYMBOL %in% go_input$symbol)] %>%
+ unique()
+
+
+significant_genes.counts = test_results.6hrs$counts
+row.names(significant_genes.counts) = test_results.6hrs$significant_genes$symbol
+
+significant_genes.counts = significant_genes.counts[which(test_results.6hrs$significant_genes$symbol %in% go.genes_targets),]
+
+plt.title = paste("Differential Transcript Expression at 6hrs (Counts) in Cytokine-related")
+
+pheatmap::pheatmap(significant_genes.counts, annotation_col = anno[,1:2], clustering_callback = callback, show_colnames = F,
+                   cluster_cols = F,cluster_row = F, color = colors, scale = "row",
+                   annotation_colors = heatmap.annotation_colors,
+                   main = plt.title)
+
+
+```
+
+
+
+# Results
+```{r all genes, echo = F, results = "asis"}
+library(knitr)
+kable(go_input %>% select(-entrez))
+
+```
+

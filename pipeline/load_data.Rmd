@@ -1,0 +1,63 @@
+---
+title: "load_data"
+output: pdf_document
+---
+---
+title: "Load Salmon Quantifications"
+output:
+  pdf_document: default
+  html_document: default
+    keep_md: yes
+---
+```{r setup, include=FALSE.,echo = FALSE}
+library(BiocManager)
+library(dplyr)
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(PoiClaClu)
+library(RColorBrewer)
+library(vsn)
+library(genefilter)
+library(apeglm)
+library(tidyverse)
+library(DEGreport)
+library(limma)
+library(tximeta)
+
+```
+
+```{r knitr_options, include=F}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+## Protocol:
+
+### 1. Use salmon to quantify transcripts
+### 2. Use tximeta to get count matrix
+### 3. use with DEseq for expression
+
+
+import data table & create table with file paths to sample quant files
+``` {r importdata, include = F}
+
+#Table with names and file paths for salmon quantifications
+data_table = read.delim("salmon_quant_filePaths")
+
+txdata = data_table %>% dplyr::select(c(SampleName, SampleGenotype, SampleTime, Replicate, QuantFile)) %>%
+  dplyr::rename(names = SampleName, files = QuantFile)
+
+dirPath = "/active/allenspach_e/AllenspachRNASeqData/2022_SH2B3_TcellSeq/data/"
+
+#rename files column to include full path
+txdata = txdata %>% mutate(files = paste(dirPath, files, sep = ""))
+
+#import quantifications with automatic metadata
+se = tximeta(data.frame(as_tibble(txdata)), countsFromAbundance = "scaledTPM")
+# se = tximeta(data.frame(as_tibble(txdata)))
+
+```
+
+
+

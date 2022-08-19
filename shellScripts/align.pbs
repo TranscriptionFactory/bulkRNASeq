@@ -1,0 +1,22 @@
+#! /bin/bash
+#PBS -S /bin/bash
+#PBS -N align
+#PBS -M #### ORGANIZATION_EMAIL ####
+#PBS -q freeq
+#PBS -P 52d64c1b-8ad2-4e00-8470-bf5bb47ca775
+#PBS -l select=1:mem=18gb:ncpus=1
+#PBS -j oe
+#PBS -o #### QUANT_FILE_PATH ####
+#PBS -m abe
+
+
+## load any required modules on the worker nodes
+module load biobuilds/2017.11
+
+## load salmon files
+module load Salmon/0.9.1
+
+## create index file - done
+
+## quantify
+source "shellScripts/quant.sh"
